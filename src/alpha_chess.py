@@ -67,7 +67,8 @@ class ChessGame:
                 print(self.board)
         result = self.board.result()
         print("Game over:", result)
-        print(f"{self.board.outcome().winner} wins!")
+        winner = 'White wins' if self.board.outcome().winner == True else 'Black wins' if self.board.outcome().winner == False else 'Draw'
+        print(f"{winner}!")
         if gui:
             gui.wait_for_quit()
         return result
