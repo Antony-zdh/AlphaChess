@@ -7,10 +7,14 @@ import chess
 Channel(s), Data,                  Description
 0 - 5,      Current Player Pieces, "P, N, B, R, Q, K"
 6 - 11,     Opponent Pieces,       "p, n, b, r, q, k"
-12,         Side to Move,          "All 1s for White, 0s for Black (or vice versa)"
+12,         Side to Move,          "All 0s for White, 1s for Black (or vice versa)"
 13 - 16,    Castling,              "4 planes (WK, WQ, BK, BQ)"
 17,         En Passant,            "Your current binary map"
 18,         50-move clock,         "Normalized (0.0 to 1.0)"
+
+Looking at this tensor, you may wonder how is Side to Move useful?
+This channel breaks the symmetry, since the white always moves first,
+and the chess is therefore asymmetrical game. 
 """
 
 class AlphaChess(nn.Module):

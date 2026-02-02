@@ -1,2 +1,6 @@
 data/
 *.pgn
+models/
+__pycache__/
+wandb/
+logs/
