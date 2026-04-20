@@ -61,6 +61,12 @@ class ChessGame:
             # Apply the move 
             if move in self.board.legal_moves:
                 self.board.push(move)
+            else:
+                print("Illegal move attempted. Fall back to random move.")
+                import random
+                legal_moves = list(self.board.legal_moves)
+                move = random.choice(legal_moves)
+                self.board.push(move)
 
             # Update View
             if gui:
@@ -182,10 +188,23 @@ class AIPlayer(Player):
         best_move_from = best_move_index // 64
         best_move_to = best_move_index % 64
 
-        # 5. Make the move
+        # 5. Handle move legality and promotion ambiguity
+        if chess.Move(best_move_from, best_move_to) in legal_moves:
+            best_move = chess.Move(best_move_from, best_move_to)
+        else:
+            # Handles promotion ambiguity by enforcing promotion to queen
+            for promo_piece in [chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT]:
+                promo_move = chess.Move(best_move_from, best_move_to, promotion=promo_piece)
+                if promo_move in legal_moves:
+                    best_move = promo_move
+                    break
+
+        # 6. Make the move
         # Ensure the move is legal and in UCI format
         best_move = chess.Move(best_move_from, best_move_to)
         if best_move in legal_moves:
             return best_move
         else:
-            raise RuntimeError("AI selected an illegal move.")
+            print("AI selected an illegal move. Fall back to random move.")
+            import random
+            return random.choice(legal_moves)

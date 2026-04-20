@@ -2,3 +2,5 @@ models/
 __pycache__/
 wandb/
 logs/
+.idea/
+.venv/

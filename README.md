@@ -2,7 +2,7 @@
 
 This is a RL project that aims to build a chess AI from scratch.
 
-Currently, the project milestones are designed as follows:
+## Milestones
 
 - [x] **1. The Arena**: Set up the chess environment and the basic game loop. Use a random agent to play against the user.
 - [x] **2. Visualization**: Set up a visualization tool to display the game board real time.
