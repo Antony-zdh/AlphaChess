@@ -166,7 +166,7 @@ def train(args):
     ce_loss = torch.nn.CrossEntropyLoss() # For Policy Head
     mse_loss = torch.nn.MSELoss() # For Value Head
 
-    # User Wandb for logging (include hyperparameters)
+    # Use Wandb for logging (include hyperparameters)
     if args.wandb:
         wandb.init(project="AlphaChess_Training", config=vars(args))
         wandb.watch(model, log="gradients", log_freq=args.log_interval)
