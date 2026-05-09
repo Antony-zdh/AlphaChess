@@ -1,4 +1,5 @@
-models/
+models/alpha_chess_epoch_*.pth
+!models/alpha_chess_epoch_16.pth
 __pycache__/
 wandb/
 logs/
