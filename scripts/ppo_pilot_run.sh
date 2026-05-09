@@ -11,7 +11,7 @@ MODEL_PATH="models/alpha_chess_epoch_16.pth"
 LOG_INTERVAL=1
 SAVE_INTERVAL=10
 OUTPUT_PATH="models/ppo_models/"
-USE_WANDB=true
+USE_WANDB="${USE_WANDB:-true}"
 
 echo "🚀 Starting Alpha Chess PPO Training..."
 echo "iterations: $ITERATIONS"
@@ -24,7 +24,7 @@ echo "Wandb logging: $USE_WANDB"
 
 if command -v py &> /dev/null; then
     PYTHON_CMD="py"
-else if command -v python3 &> /dev/null; then
+elif command -v python3 &> /dev/null; then
     PYTHON_CMD="python3"
 else
     PYTHON_CMD="python"

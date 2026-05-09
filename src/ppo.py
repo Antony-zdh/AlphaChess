@@ -6,6 +6,8 @@ import argparse
 import logging
 import wandb
 import random
+import json
+from torch import nn
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -92,10 +94,10 @@ class PPOTrajectory:
 class PPOGroup():
     """ Group for PPO training, containing a batch of trajectories """
     def __init__(self, trajectories):
-        if isinstance(trajectories, list) and len(trajectories) == PPO_BATCH_SIZE:
+        if isinstance(trajectories, list) and len(trajectories) > 0:
             self.trajectories = trajectories
         else:
-            raise ValueError("PPOGroup requires a list of trajectories with capacity {}.".format(PPO_BATCH_SIZE))
+            raise ValueError("PPOGroup requires a non-empty list of trajectories.")
 
     def get_data_tensors(self):
         """
@@ -120,7 +122,7 @@ class PPOGroup():
                 legal_masks.append(step["legal_mask"])
 
         # Convert lists to tensors
-        states = torch.stack(states)  # (total_steps, 19, 8, 8)
+        states = torch.stack(states).squeeze(1)  # (total_steps, 19, 8, 8)
         actions = torch.tensor(actions, dtype=torch.long)  # (total_steps,)
         log_probs = torch.tensor(log_probs, dtype=torch.float)  # (total_steps,)
         returns = torch.tensor(returns, dtype=torch.float)  # (total_steps,)
@@ -128,18 +130,6 @@ class PPOGroup():
         legal_masks = torch.stack(legal_masks).to(torch.bool)  # (total_steps, 4096)
 
         return states, actions, log_probs, returns, advantages, legal_masks
-
-    def shuffle_and_get_dl(self):
-        """
-        Shuffle the data for PPO training.
-
-        Returns:
-            A DataLoader that yields shuffled batches of (state, action, log_prob, return, advantage).
-        """
-        states, actions, log_probs, returns, advantages, legal_masks = self.get_data_tensors()
-        dataset = torch.utils.data.TensorDataset(states, actions, log_probs, returns, advantages, legal_masks)
-        data_loader = DataLoader(dataset, batch_size=PPO_MINI_BATCH_SIZE, shuffle=True)
-        return data_loader
 
         
 class ActorCritic:
@@ -162,91 +152,159 @@ class ActorCritic:
         log_prob = policy_dist.log_prob(action)
         return action.item(), log_prob.item(), value.item(), mask.squeeze(0).to(torch.bool).cpu()
 
+    def select_actions_batch(self, states, boards):
+        policy_logits, values = self.model(states)
+        actions = []
+        log_probs = []
+        legal_masks = []
+
+        for idx, board in enumerate(boards):
+            legal_moves = list(board.legal_moves)
+            legal_move_indices = [move.from_square * 64 + move.to_square for move in legal_moves]
+            mask = torch.zeros_like(policy_logits[idx])
+            mask[legal_move_indices] = 1.0
+            masked_logits = policy_logits[idx].masked_fill(mask == 0, float("-inf"))
+
+            policy_dist = torch.distributions.Categorical(logits=masked_logits)
+            action = policy_dist.sample()
+            log_prob = policy_dist.log_prob(action)
+
+            actions.append(action.item())
+            log_probs.append(log_prob.item())
+            legal_masks.append(mask.to(torch.bool).cpu())
+
+        values = values.squeeze(-1).detach().cpu().tolist()
+        return actions, log_probs, values, legal_masks
+
     def get_policy_and_value(self, state):
         policy_logits, value = self.model(state)
         return policy_logits, value
 
-    def self_play_episode(self, device):
-        """ Simulate a game episode by self-play and return the trajectory. """
+    def self_play_episodes(self, device):
+        """ Simulate multiple game episodes by self-play and return the trajectories. """
 
         # Set model to eval mode for inference during self-play
         self.model.eval()
         with torch.no_grad():  # Disable gradient computation during self-play
-            trajectory_white = PPOTrajectory()
-            trajectory_black = PPOTrajectory()
-            board = chess.Board()
+            batch_size = PPO_BATCH_SIZE // 2
+            boards = [chess.Board() for _ in range(batch_size)]
+            trajectories_white = [PPOTrajectory() for _ in range(batch_size)]
+            trajectories_black = [PPOTrajectory() for _ in range(batch_size)]
             encoder = BoardEncoder()
 
-            while not board.is_game_over():
-                state = encoder.encode(board).unsqueeze(0).to(device)  # (1, 19, 8, 8)
-                action, log_prob, value, legal_mask = self.select_action(state, board)
-                move_from = action // 64
-                move_to = action % 64
-                legal_moves = list(board.legal_moves)
-                candidates = [m for m in legal_moves if m.from_square == move_from and m.to_square == move_to]
-                if candidates:
-                    queen_promo = [m for m in candidates if m.promotion == chess.QUEEN]
-                    move = queen_promo[0] if queen_promo else candidates[0]
-                else:
-                    # Should not happen with masking; resample once and fail fast if it repeats.
-                    logging.warning("Selected an illegal move index. Resampling once.")
-                    action, log_prob, value, legal_mask = self.select_action(state, board)
-                    move_from, move_to = action // 64, action % 64
+            while any(not board.is_game_over() for board in boards):
+                active_indices = [i for i, board in enumerate(boards) if not board.is_game_over()]
+                active_boards = [boards[i] for i in active_indices]
+                state_tensors = [encoder.encode(board) for board in active_boards]
+                states = torch.stack(state_tensors).to(device)
+
+                actions, log_probs, values, legal_masks = self.select_actions_batch(states, active_boards)
+
+                for offset, board_idx in enumerate(active_indices):
+                    board = boards[board_idx]
+                    action = actions[offset]
+                    log_prob = log_probs[offset]
+                    value = values[offset]
+                    legal_mask = legal_masks[offset]
+
+                    move_from = action // 64
+                    move_to = action % 64
                     legal_moves = list(board.legal_moves)
                     candidates = [m for m in legal_moves if m.from_square == move_from and m.to_square == move_to]
                     if candidates:
                         queen_promo = [m for m in candidates if m.promotion == chess.QUEEN]
                         move = queen_promo[0] if queen_promo else candidates[0]
                     else:
-                        logging.error("Resampled an illegal move index again. Board FEN: %s", board.fen())
-                        raise RuntimeError("Failed to select a legal move after one resample.")
+                        logging.warning("Selected an illegal move index. Resampling once.")
+                        resample_actions, resample_log_probs, resample_values, resample_masks = self.select_actions_batch(
+                            states[offset:offset + 1], [board]
+                        )
+                        action = resample_actions[0]
+                        log_prob = resample_log_probs[0]
+                        value = resample_values[0]
+                        legal_mask = resample_masks[0]
+                        move_from = action // 64
+                        move_to = action % 64
+                        legal_moves = list(board.legal_moves)
+                        candidates = [m for m in legal_moves if m.from_square == move_from and m.to_square == move_to]
+                        if candidates:
+                            queen_promo = [m for m in candidates if m.promotion == chess.QUEEN]
+                            move = queen_promo[0] if queen_promo else candidates[0]
+                        else:
+                            logging.error("Resampled an illegal move index again. Board FEN: %s", board.fen())
+                            raise RuntimeError("Failed to select a legal move after one resample.")
 
-                reward = 0  # Intermediate reward can be defined based on heuristics
-                next_value = 0  # Will be computed later (Last step has next_value = 0)
-                # Put states on CPU for trajectory storage to save GPU memory
-                if board.turn == chess.WHITE:
-                    assert 0 <= action < 4096, "Action index out of bounds. This should not happen with proper encoding."
-                    assert bool(legal_mask[action].item()), "Selected action is not legal for White. This should not happen with proper masking."
-                    board.push(move)  # Push before adding step to ensure correct done value
-                    done = board.is_game_over()
-                    trajectory_white.add_step(state.cpu(), action, log_prob, reward, value, next_value, done, legal_mask)
+                    reward = 0
+                    next_value = 0
+                    if board.turn == chess.WHITE:
+                        assert 0 <= action < 4096, "Action index out of bounds. This should not happen with proper encoding."
+                        assert bool(legal_mask[action].item()), "Selected action is not legal for White. This should not happen with proper masking."
+                        board.push(move)
+                        done = board.is_game_over()
+                        trajectories_white[board_idx].add_step(
+                            state_tensors[offset],
+                            action,
+                            log_prob,
+                            reward,
+                            value,
+                            next_value,
+                            done,
+                            legal_mask,
+                        )
+                    else:
+                        assert 0 <= action < 4096, "Action index out of bounds. This should not happen with proper encoding."
+                        assert bool(legal_mask[action].item()), "Selected action is not legal for Black. This should not happen with proper masking."
+                        board.push(move)
+                        done = board.is_game_over()
+                        trajectories_black[board_idx].add_step(
+                            state_tensors[offset],
+                            action,
+                            log_prob,
+                            reward,
+                            value,
+                            next_value,
+                            done,
+                            legal_mask,
+                        )
+
+            for board_idx in range(batch_size):
+                result = boards[board_idx].result()
+                if result == "1-0":
+                    trajectories_white[board_idx].steps[-1]["reward"] = 1
+                    trajectories_black[board_idx].steps[-1]["reward"] = -1
+                elif result == "0-1":
+                    trajectories_white[board_idx].steps[-1]["reward"] = -1
+                    trajectories_black[board_idx].steps[-1]["reward"] = 1
                 else:
-                    assert 0 <= action < 4096, "Action index out of bounds. This should not happen with proper encoding."
-                    assert bool(legal_mask[action].item()), "Selected action is not legal for Black. This should not happen with proper masking."
-                    board.push(move)  # Push before adding step to ensure correct done value
-                    done = board.is_game_over()
-                    trajectory_black.add_step(state.cpu(), action, log_prob, reward, value, next_value, done, legal_mask)
+                    trajectories_white[board_idx].steps[-1]["reward"] = 0
+                    trajectories_black[board_idx].steps[-1]["reward"] = 0
 
-
-            # Final reward based on game outcome
-            result = board.result()
-            if result == "1-0":
-                trajectory_white.steps[-1]["reward"] = 1  # White wins
-                trajectory_black.steps[-1]["reward"] = -1  # Black loses
-            elif result == "0-1":
-                trajectory_white.steps[-1]["reward"] = -1  # White loses
-                trajectory_black.steps[-1]["reward"] = 1  # Black wins
-            else:
-                trajectory_white.steps[-1]["reward"] = 0  # Draw
-                trajectory_black.steps[-1]["reward"] = 0  # Draw
-
-            # Compute next_value for each step (value of the next state)
-            for trajectory in [trajectory_white, trajectory_black]:
-                for i in range(len(trajectory.steps) - 1):
-                    trajectory.steps[i]["next_value"] = trajectory.steps[i + 1]["value"]
-                trajectory.steps[-1]["next_value"] = 0  # Last step has no next state
+                for trajectory in [trajectories_white[board_idx], trajectories_black[board_idx]]:
+                    for i in range(len(trajectory.steps) - 1):
+                        trajectory.steps[i]["next_value"] = trajectory.steps[i + 1]["value"]
+                    trajectory.steps[-1]["next_value"] = 0
 
         # After the episode, switch back to training mode
         self.model.train()
 
-        return trajectory_white, trajectory_black
+        return trajectories_white + trajectories_black
 
 
 def train_ppo(args):
     """ Main training loop for PPO. """
 
+    # Find device
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+        print("Using Apple Silicon GPU (MPS)")
+    else:
+        device = torch.device("cpu")
+        print("Using CPU. For better performance, consider using a GPU.")
+
     # 1. Initialize model, optimizer, and other components
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = AlphaChess().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.iterations * PPO_NUM_UPDATES_PER_BATCH)
@@ -267,7 +325,7 @@ def train_ppo(args):
 
     # Use Wandb for logging (include hyperparameters)
     if args.wandb:
-        wandb.init(project="AlphaChess_RL", config=vars(args))
+        wandb.init(project="AlphaChess_PPO", config=vars(args))
         wandb.watch(model, log="gradients", log_freq=args.log_interval)
 
     print("Starting PPO training...")
@@ -275,7 +333,7 @@ def train_ppo(args):
     actor_critic = ActorCritic(model)
 
     # 2. Main training loop
-    for iteration in range(args.iterations):
+    for iteration in range(1, args.iterations + 1):
 
         # Metrix reset
         avg_total_loss = 0
@@ -284,25 +342,21 @@ def train_ppo(args):
         avg_entropy_bonus = 0
         
         # a. Collect trajectories by self-play
-        trajectories = []
-        for _ in range(PPO_BATCH_SIZE // 2): # Each episode generates two trajectories
-            # Simulate a game episode and fill the trajectory
-            trajectory_white, trajectory_black = actor_critic.self_play_episode(device)
-            # After the episode, white and black trajectories are treated as individual trajectories
-            trajectories.append(trajectory_white)
-            trajectories.append(trajectory_black)
+        trajectories = actor_critic.self_play_episodes(device)
 
         # b. Compute advantages and returns for each trajectory
         for trajectory in trajectories:
             trajectory.compute_advantages_and_returns()
 
-        # c. Create PPOGroup for a batch and get shuffled training data
-        ppo_group = PPOGroup(trajectories)
-        training_dl = ppo_group.shuffle_and_get_dl()  # DataLoader of (state, action, log_prob, return, advantage)
-        
+        # c. Shuffle trajectories and split into trajectory-level minibatches
+        random.shuffle(trajectories)
+        num_updates = 0
+
         # d. Perform multiple minibatches of PPO updates on the collected data
-        for mini_batch in training_dl:
-            states, actions, old_log_probs, returns, advantages, legal_masks = mini_batch
+        for start in range(0, len(trajectories), PPO_MINI_BATCH_SIZE):
+            mini_trajs = trajectories[start:start + PPO_MINI_BATCH_SIZE]
+            ppo_group = PPOGroup(mini_trajs)
+            states, actions, old_log_probs, returns, advantages, legal_masks = ppo_group.get_data_tensors()
             
             # Move tensors to device
             states = states.to(device)
@@ -343,12 +397,13 @@ def train_ppo(args):
             avg_policy_loss += policy_loss.item()
             avg_value_loss += value_loss.item()
             avg_entropy_bonus += entropy_bonus.item()
+            num_updates += 1
 
         # g. Logging
-        avg_total_loss /= len(training_dl)
-        avg_policy_loss /= len(training_dl)
-        avg_value_loss /= len(training_dl)
-        avg_entropy_bonus /= len(training_dl)
+        avg_total_loss /= max(num_updates, 1)
+        avg_policy_loss /= max(num_updates, 1)
+        avg_value_loss /= max(num_updates, 1)
+        avg_entropy_bonus /= max(num_updates, 1)
         
         # Wandb logging
         if args.wandb and iteration % args.log_interval == 0:
@@ -410,7 +465,7 @@ def train_ppo(args):
 
 
 
-def __main__():
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train PPO agent for chess.")
     parser.add_argument("--iterations", type=int, default=1000, help="Number of training iterations")
     parser.add_argument("--model_path", type=str, default="models/alpha_chess_epoch_16.pth", help="Path to load the SFT model for PPO training")
