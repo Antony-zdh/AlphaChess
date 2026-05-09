@@ -5,8 +5,6 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 PROJECT_ROOT="$SCRIPT_DIR/.."
 export PYTHONPATH="$PROJECT_ROOT:$PYTHONPATH"
 
-export WANDB_API_KEY="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"
-
 BATCH_SIZE=256
 EPOCHS=20
 LR=0.001

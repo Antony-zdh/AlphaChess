@@ -365,16 +365,61 @@ def train_ppo(args):
         if iteration % args.log_interval == 0:
             logging.info(f"Iteration {iteration}: Policy Loss={avg_policy_loss:.4f}, Value Loss={avg_value_loss:.4f}, Entropy Bonus={avg_entropy_bonus:.4f}, Total Loss={avg_total_loss:.4f}, LR={scheduler.get_last_lr()[0]:.6f}")
 
+        # h. Save model checkpoint
+        if iteration % args.save_interval == 0:
+            # We save the model, optimizer, scheduler states and training configuration
+            config = {
+                "iteration": iteration,
+                "PPO_CONFIG": {
+                    "PPO_BATCH_SIZE": PPO_BATCH_SIZE,
+                    "PPO_MINI_BATCH_SIZE": PPO_MINI_BATCH_SIZE,
+                    "PPO_GAMMA": PPO_GAMMA,
+                    "PPO_LAMBDA": PPO_LAMBDA,
+                    "PPO_EPSILON": PPO_EPSILON,
+                    "PPO_VF_LOSS_COEF": PPO_VF_LOSS_COEF,
+                    "PPO_ENTROPY_COEF": PPO_ENTROPY_COEF,
+                },
+                "ARGS": {
+                    "total_iterations": args.iterations,
+                    "model_path": args.model_path,
+                    "lr": args.lr,
+                    "wandb": args.wandb,
+                    "log_interval": args.log_interval,
+                    "save_interval": args.save_interval,
+                    "output_path": args.output_path
+                }
+            }
+            
+            model_state = model.state_dict()
+            optimizer_state = optimizer.state_dict()
+            scheduler_state = scheduler.state_dict()
+            
+            checkpoint_dir = os.path.join(args.output_path, f"ppo_model_itr_{iteration}")
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            config_path = os.path.join(checkpoint_dir, f"config_itr_{iteration}.json")
+            checkpoint_path = os.path.join(checkpoint_dir, f"ppo_model_itr_{iteration}.pth")
+            optimizer_path = os.path.join(checkpoint_dir, f"optimizer_itr_{iteration}.pth")
+            scheduler_path = os.path.join(checkpoint_dir, f"scheduler_itr_{iteration}.pth")
+            
+            with open(config_path, "w") as f:
+                json.dump(config, f)
+            torch.save(model_state, checkpoint_path)
+            torch.save(optimizer_state, optimizer_path)
+            torch.save(scheduler_state, scheduler_path)
+            logging.info(f"Saved model checkpoint to {checkpoint_dir}")
+
 
 
 def __main__():
     parser = argparse.ArgumentParser(description="Train PPO agent for chess.")
     parser.add_argument("--iterations", type=int, default=1000, help="Number of training iterations")
-    parser.add_argument("--model_path", type=str, default="ppo_model.pth", help="Path to save the trained model")
+    parser.add_argument("--model_path", type=str, default="models/alpha_chess_epoch_16.pth", help="Path to load the SFT model for PPO training")
     parser.add_argument("--lr", type=float, default=0.001, help="Learning rate for the optimizer")
     parser.add_argument("--wandb", action="store_true", help="Enable Wandb logging")
     parser.add_argument("--log_interval", type=int, default=1, help="Interval for logging to Wandb")
-    
+    parser.add_argument("--save_interval", type=int, default=100, help="Interval for saving model checkpoints")
+    parser.add_argument("--output_path", type=str, default="models/ppo_models/", help="Path to save the trained model and configuration")
+
     args = parser.parse_args()
 
     train_ppo(args)

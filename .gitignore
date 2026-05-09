@@ -5,3 +5,4 @@ wandb/
 logs/
 .idea/
 .venv/
+.env
