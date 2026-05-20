@@ -18,6 +18,10 @@ PPO_MINI_BATCH_SIZE = 8  # PPO mini-batch size for multiple epochs of updates
 PPO_NUM_UPDATES_PER_BATCH = PPO_BATCH_SIZE // PPO_MINI_BATCH_SIZE  # Number of updates per batch of trajectories
 PPO_EPOCHS = 4  # Number of passes over collected trajectories per iteration
 PPO_GRADIENT_CLIP = 0.5  # Max norm for gradient clipping
+PPO_DRAW_PENALTY = -0.05   # Reward for a draw (discourages passive play)
+PPO_OPENING_PLIES = 8       # Max random opening plies per game (uniform 0..N)
+PPO_POOL_MAX_SIZE = 3       # Max frozen checkpoints kept in opponent pool
+PPO_POOL_FRACTION = 0.3     # Fraction of iterations that play vs a pool opponent
 PPO_GAMMA = 0.99  # Discount factor for rewards
 PPO_LAMBDA = 0.95  # GAE lambda for advantage estimation
 PPO_EPSILON = 0.2  # Clipping parameter for PPO loss
@@ -190,6 +194,10 @@ class ActorCritic:
         with torch.no_grad():  # Disable gradient computation during self-play
             batch_size = PPO_BATCH_SIZE // 2
             boards = [chess.Board() for _ in range(batch_size)]
+            for board in boards:
+                for _ in range(random.randint(0, PPO_OPENING_PLIES)):
+                    if not board.is_game_over():
+                        board.push(random.choice(list(board.legal_moves)))
             trajectories_white = [PPOTrajectory() for _ in range(batch_size)]
             trajectories_black = [PPOTrajectory() for _ in range(batch_size)]
             encoder = BoardEncoder()
@@ -278,20 +286,111 @@ class ActorCritic:
                     trajectories_white[board_idx].steps[-1]["reward"] = -1
                     trajectories_black[board_idx].steps[-1]["reward"] = 1
                 else:
-                    trajectories_white[board_idx].steps[-1]["reward"] = 0
-                    trajectories_black[board_idx].steps[-1]["reward"] = 0
+                    trajectories_white[board_idx].steps[-1]["reward"] = PPO_DRAW_PENALTY
+                    trajectories_black[board_idx].steps[-1]["reward"] = PPO_DRAW_PENALTY
 
                 n_w = len(trajectories_white[board_idx].steps)
                 n_b = len(trajectories_black[board_idx].steps)
-                for i in range(n_w - 1):
+                for i in range(min(n_w - 1, n_b)):
                     trajectories_white[board_idx].steps[i]["next_value"] = -trajectories_black[board_idx].steps[i]["value"]
-                for i in range(n_b - 1):
+                for i in range(min(n_b - 1, n_w - 1)):
                     trajectories_black[board_idx].steps[i]["next_value"] = -trajectories_white[board_idx].steps[i + 1]["value"]
 
         # After the episode, switch back to training mode
         self.model.train()
 
         return trajectories_white + trajectories_black
+
+    def pool_episodes(self, device, opponent_model):
+        """Collect trajectories by playing against a frozen pool opponent (half games as each color)."""
+        n_games = PPO_BATCH_SIZE
+        half = n_games // 2
+        learner_color = [chess.WHITE] * half + [chess.BLACK] * (n_games - half)
+
+        self.model.eval()
+        opponent_model.eval()
+        with torch.no_grad():
+            boards = [chess.Board() for _ in range(n_games)]
+            encoder = BoardEncoder()
+            for board in boards:
+                for _ in range(random.randint(0, PPO_OPENING_PLIES)):
+                    if not board.is_game_over():
+                        board.push(random.choice(list(board.legal_moves)))
+
+            traj_white = [PPOTrajectory() for _ in range(n_games)]
+            traj_black = [PPOTrajectory() for _ in range(n_games)]
+            opp_values = [[] for _ in range(n_games)]
+
+            while any(not board.is_game_over() for board in boards):
+                active = [i for i, b in enumerate(boards) if not b.is_game_over()]
+                learn_idx = [i for i in active if boards[i].turn == learner_color[i]]
+                opp_idx   = [i for i in active if boards[i].turn != learner_color[i]]
+
+                if learn_idx:
+                    learn_boards = [boards[i] for i in learn_idx]
+                    st_list = [encoder.encode(b) for b in learn_boards]
+                    states = torch.stack(st_list).to(device)
+                    actions, log_probs, values, legal_masks = self.select_actions_batch(states, learn_boards)
+                    for off, board_idx in enumerate(learn_idx):
+                        board = boards[board_idx]
+                        action, log_prob, value, legal_mask = actions[off], log_probs[off], values[off], legal_masks[off]
+                        move_from, move_to = action // 64, action % 64
+                        legal_moves = list(board.legal_moves)
+                        candidates = [m for m in legal_moves if m.from_square == move_from and m.to_square == move_to]
+                        if candidates:
+                            queen_promo = [m for m in candidates if m.promotion == chess.QUEEN]
+                            move = queen_promo[0] if queen_promo else candidates[0]
+                        else:
+                            move = legal_moves[0]
+                        color_before = board.turn
+                        board.push(move)
+                        done = board.is_game_over()
+                        traj = traj_white[board_idx] if color_before == chess.WHITE else traj_black[board_idx]
+                        traj.add_step(st_list[off], action, log_prob, 0, value, 0, done, legal_mask)
+
+                if opp_idx:
+                    opp_boards = [boards[i] for i in opp_idx]
+                    opp_st_list = [encoder.encode(b) for b in opp_boards]
+                    opp_states = torch.stack(opp_st_list).to(device)
+                    opp_logits, opp_vals = opponent_model(opp_states)
+                    opp_vals = opp_vals.squeeze(-1)
+                    for off, board_idx in enumerate(opp_idx):
+                        board = boards[board_idx]
+                        legal_moves = list(board.legal_moves)
+                        lmi = [m.from_square * 64 + m.to_square for m in legal_moves]
+                        mask = torch.zeros(4096, device=device)
+                        mask[lmi] = 1.0
+                        masked = opp_logits[off].masked_fill(mask == 0, float("-inf"))
+                        action = torch.argmax(masked).item()
+                        move_from, move_to = action // 64, action % 64
+                        candidates = [m for m in legal_moves if m.from_square == move_from and m.to_square == move_to]
+                        if candidates:
+                            queen_promo = [m for m in candidates if m.promotion == chess.QUEEN]
+                            move = queen_promo[0] if queen_promo else candidates[0]
+                        else:
+                            move = legal_moves[0]
+                        opp_values[board_idx].append(-opp_vals[off].item())
+                        board.push(move)
+
+            for board_idx in range(n_games):
+                result = boards[board_idx].result()
+                is_white = learner_color[board_idx] == chess.WHITE
+                traj = traj_white[board_idx] if is_white else traj_black[board_idx]
+                if not traj.steps:
+                    continue
+                if result == "1-0":
+                    traj.steps[-1]["reward"] = 1 if is_white else -1
+                elif result == "0-1":
+                    traj.steps[-1]["reward"] = -1 if is_white else 1
+                else:
+                    traj.steps[-1]["reward"] = PPO_DRAW_PENALTY
+                for i in range(len(traj.steps) - 1):
+                    if i < len(opp_values[board_idx]):
+                        traj.steps[i]["next_value"] = opp_values[board_idx][i]
+
+        self.model.train()
+        learner_trajs = [traj_white[i] if learner_color[i] == chess.WHITE else traj_black[i] for i in range(n_games)]
+        return [t for t in learner_trajs if t.steps]
 
 
 def train_ppo(args):
@@ -335,6 +434,7 @@ def train_ppo(args):
     print("Starting PPO training...")
     model.train() # Set model to training mode
     actor_critic = ActorCritic(model)
+    opponent_pool = []  # Paths to frozen checkpoint files
 
     # 2. Main training loop
     for iteration in range(1, args.iterations + 1):
@@ -344,9 +444,14 @@ def train_ppo(args):
         avg_policy_loss = 0
         avg_value_loss = 0
         avg_entropy_bonus = 0
-        
-        # a. Collect trajectories by self-play
-        trajectories = actor_critic.self_play_episodes(device)
+
+        # a. Collect trajectories (self-play or vs pool opponent)
+        if opponent_pool and random.random() < PPO_POOL_FRACTION:
+            opp_model = AlphaChess().to(device)
+            opp_model.load_state_dict(torch.load(random.choice(opponent_pool), map_location=device))
+            trajectories = actor_critic.pool_episodes(device, opp_model)
+        else:
+            trajectories = actor_critic.self_play_episodes(device)
 
         # b. Compute advantages and returns for each trajectory
         for trajectory in trajectories:
@@ -468,6 +573,9 @@ def train_ppo(args):
             torch.save(optimizer_state, optimizer_path)
             torch.save(scheduler_state, scheduler_path)
             logging.info(f"Saved model checkpoint to {checkpoint_dir}")
+            opponent_pool.append(checkpoint_path)
+            if len(opponent_pool) > PPO_POOL_MAX_SIZE:
+                opponent_pool.pop(0)
 
 
 

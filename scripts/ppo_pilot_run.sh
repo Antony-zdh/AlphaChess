@@ -7,7 +7,7 @@ export PYTHONPATH="$PROJECT_ROOT:$PYTHONPATH"
 
 ITERATIONS=20
 LR=1e-4
-MODEL_PATH="models/alpha_chess_epoch_16.pth"
+MODEL_PATH="models/sft_models/alpha_chess_epoch_16.pth"
 LOG_INTERVAL=1
 SAVE_INTERVAL=10
 OUTPUT_PATH="models/ppo_models/"
