@@ -16,6 +16,8 @@ from model import BoardEncoder, AlphaChess
 PPO_BATCH_SIZE = 32  # PPO uses batch of trajectories per update
 PPO_MINI_BATCH_SIZE = 8  # PPO mini-batch size for multiple epochs of updates
 PPO_NUM_UPDATES_PER_BATCH = PPO_BATCH_SIZE // PPO_MINI_BATCH_SIZE  # Number of updates per batch of trajectories
+PPO_EPOCHS = 4  # Number of passes over collected trajectories per iteration
+PPO_GRADIENT_CLIP = 0.5  # Max norm for gradient clipping
 PPO_GAMMA = 0.99  # Discount factor for rewards
 PPO_LAMBDA = 0.95  # GAE lambda for advantage estimation
 PPO_EPSILON = 0.2  # Clipping parameter for PPO loss
@@ -309,7 +311,7 @@ def train_ppo(args):
     # 1. Initialize model, optimizer, and other components
     model = AlphaChess().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.iterations * PPO_NUM_UPDATES_PER_BATCH)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.iterations * PPO_NUM_UPDATES_PER_BATCH * PPO_EPOCHS)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
     
@@ -350,56 +352,58 @@ def train_ppo(args):
         for trajectory in trajectories:
             trajectory.compute_advantages_and_returns()
 
-        # c. Shuffle trajectories and split into trajectory-level minibatches
-        random.shuffle(trajectories)
+        # c. Perform PPO_EPOCHS passes over the collected trajectories
         num_updates = 0
+        for _ in range(PPO_EPOCHS):
+            random.shuffle(trajectories)
 
-        # d. Perform multiple minibatches of PPO updates on the collected data
-        for start in range(0, len(trajectories), PPO_MINI_BATCH_SIZE):
-            mini_trajs = trajectories[start:start + PPO_MINI_BATCH_SIZE]
-            ppo_group = PPOGroup(mini_trajs)
-            states, actions, old_log_probs, returns, advantages, legal_masks = ppo_group.get_data_tensors()
-            
-            # Move tensors to device
-            states = states.to(device)
-            actions = actions.to(device)
-            old_log_probs = old_log_probs.to(device)
-            returns = returns.to(device)
-            advantages = advantages.to(device)
-            legal_masks = legal_masks.to(device)
+            # d. Perform multiple minibatches of PPO updates on the collected data
+            for start in range(0, len(trajectories), PPO_MINI_BATCH_SIZE):
+                mini_trajs = trajectories[start:start + PPO_MINI_BATCH_SIZE]
+                ppo_group = PPOGroup(mini_trajs)
+                states, actions, old_log_probs, returns, advantages, legal_masks = ppo_group.get_data_tensors()
 
-            # e. Compute PPO loss
-            # CLIP loss
-            policy_logits, values = actor_critic.get_policy_and_value(states)
-            masked_logits = policy_logits.masked_fill(~legal_masks, float('-inf'))
-            policy_dist = torch.distributions.Categorical(logits=masked_logits)
-            new_log_probs = policy_dist.log_prob(actions)
-            ratio = torch.exp(new_log_probs - old_log_probs)
-            surrogate1 = ratio * advantages
-            surrogate2 = torch.clamp(ratio, 1 - PPO_EPSILON, 1 + PPO_EPSILON) * advantages
-            policy_loss = -torch.min(surrogate1, surrogate2).mean()
+                # Move tensors to device
+                states = states.to(device)
+                actions = actions.to(device)
+                old_log_probs = old_log_probs.to(device)
+                returns = returns.to(device)
+                advantages = advantages.to(device)
+                legal_masks = legal_masks.to(device)
 
-            # Value loss (MSE)
-            value_loss = torch.nn.functional.mse_loss(values.squeeze(-1), returns)
+                # e. Compute PPO loss
+                # CLIP loss
+                policy_logits, values = actor_critic.get_policy_and_value(states)
+                masked_logits = policy_logits.masked_fill(~legal_masks, float('-inf'))
+                policy_dist = torch.distributions.Categorical(logits=masked_logits)
+                new_log_probs = policy_dist.log_prob(actions)
+                ratio = torch.exp(new_log_probs - old_log_probs)
+                surrogate1 = ratio * advantages
+                surrogate2 = torch.clamp(ratio, 1 - PPO_EPSILON, 1 + PPO_EPSILON) * advantages
+                policy_loss = -torch.min(surrogate1, surrogate2).mean()
 
-            # Entropy bonus for exploration
-            entropy_bonus = torch.mean(policy_dist.entropy())
+                # Value loss (MSE)
+                value_loss = torch.nn.functional.mse_loss(values.squeeze(-1), returns)
 
-            # Total loss
-            total_loss = policy_loss + PPO_VF_LOSS_COEF * value_loss - PPO_ENTROPY_COEF * entropy_bonus    
+                # Entropy bonus for exploration
+                entropy_bonus = torch.mean(policy_dist.entropy())
 
-            # f. Backpropagation and optimization step
-            optimizer.zero_grad()
-            total_loss.backward()
-            optimizer.step()
-            scheduler.step()
+                # Total loss
+                total_loss = policy_loss + PPO_VF_LOSS_COEF * value_loss - PPO_ENTROPY_COEF * entropy_bonus
 
-            # Update metrics
-            avg_total_loss += total_loss.item()
-            avg_policy_loss += policy_loss.item()
-            avg_value_loss += value_loss.item()
-            avg_entropy_bonus += entropy_bonus.item()
-            num_updates += 1
+                # f. Backpropagation and optimization step
+                optimizer.zero_grad()
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), PPO_GRADIENT_CLIP)
+                optimizer.step()
+                scheduler.step()
+
+                # Update metrics
+                avg_total_loss += total_loss.item()
+                avg_policy_loss += policy_loss.item()
+                avg_value_loss += value_loss.item()
+                avg_entropy_bonus += entropy_bonus.item()
+                num_updates += 1
 
         # g. Logging
         avg_total_loss /= max(num_updates, 1)
