@@ -238,8 +238,9 @@ class BaseOpponent:
 class AlphaChessOpponent(BaseOpponent):
     supports_batch = True
 
-    def __init__(self, model_path: str, device: torch.device) -> None:
+    def __init__(self, model_path: str, device: torch.device, greedy: bool = False) -> None:
         self.device = device
+        self.greedy = greedy
         self.model = AlphaChess().to(device)
         self.model.load_state_dict(torch.load(model_path, map_location=device))
         self.model.eval()
@@ -259,8 +260,11 @@ class AlphaChessOpponent(BaseOpponent):
             mask = torch.zeros_like(policy_logits[idx])
             mask[legal_move_indices] = 1.0
             masked_logits = policy_logits[idx].masked_fill(mask == 0, float("-inf"))
-            probs = torch.softmax(masked_logits, dim=0)
-            action = torch.multinomial(probs, 1).item()
+            if self.greedy:
+                action = torch.argmax(masked_logits).item()
+            else:
+                probs = torch.softmax(masked_logits, dim=0)
+                action = torch.multinomial(probs, 1).item()
             moves.append(self._action_to_move(board, action))
 
         return moves
@@ -563,6 +567,40 @@ class ChessDeepRLTorchOpponent(BaseOpponent):
         return plane_index, row, col
 
 
+class StockfishOpponent(BaseOpponent):
+    supports_batch = False
+
+    # Approximate FIDE Elo per Skill Level (Stockfish 16; varies by version/hardware)
+    SKILL_ELO: dict = {
+        0: 800,  1: 900,  2: 1000, 3: 1100, 4: 1200,
+        5: 1300, 6: 1400, 7: 1500, 8: 1600, 9: 1700,
+        10: 1800, 11: 1900, 12: 2000, 13: 2100, 14: 2200,
+        15: 2400, 16: 2600, 17: 2800, 18: 3000, 19: 3200, 20: 3500,
+    }
+
+    def __init__(self, stockfish_path: str, skill_level: int = 5, movetime: float = 0.05) -> None:
+        import chess.engine
+        self.skill_level = skill_level
+        self.movetime = movetime
+        self.approx_elo = self.SKILL_ELO.get(skill_level, 1500)
+        self._engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
+        self._engine.configure({"Skill Level": skill_level})
+
+    def select_move(self, board: chess.Board) -> chess.Move:
+        import chess.engine
+        result = self._engine.play(board, chess.engine.Limit(time=self.movetime))
+        return result.move
+
+    def close(self) -> None:
+        try:
+            self._engine.quit()
+        except Exception:
+            pass
+
+    def __del__(self) -> None:
+        self.close()
+
+
 def create_opponent(spec: str, device: torch.device) -> OpponentSpec:
     spec = spec.strip()
     if not spec:
@@ -578,6 +616,18 @@ def create_opponent(spec: str, device: torch.device) -> OpponentSpec:
 
     if model_type is None:
         model_type = "alpha"
+
+    if model_type == "stockfish":
+        # spec: "stockfish:<skill_level>" or "stockfish:<path>:<skill_level>"
+        parts = model_path.split(":")
+        if len(parts) == 2 and parts[0].isdigit():
+            sf_path, skill_level = "stockfish", int(parts[0])
+        elif len(parts) == 2:
+            sf_path, skill_level = parts[0], int(parts[1])
+        else:
+            sf_path, skill_level = model_path, 5
+        opponent = StockfishOpponent(sf_path, skill_level)
+        return OpponentSpec(name=f"stockfish_skill{skill_level}", opponent=opponent)
 
     if model_type == "alpha":
         name = os.path.splitext(os.path.basename(model_path))[0]
