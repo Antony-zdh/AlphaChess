@@ -279,10 +279,12 @@ class ActorCritic:
                     trajectories_white[board_idx].steps[-1]["reward"] = 0
                     trajectories_black[board_idx].steps[-1]["reward"] = 0
 
-                for trajectory in [trajectories_white[board_idx], trajectories_black[board_idx]]:
-                    for i in range(len(trajectory.steps) - 1):
-                        trajectory.steps[i]["next_value"] = trajectory.steps[i + 1]["value"]
-                    trajectory.steps[-1]["next_value"] = 0
+                n_w = len(trajectories_white[board_idx].steps)
+                n_b = len(trajectories_black[board_idx].steps)
+                for i in range(n_w - 1):
+                    trajectories_white[board_idx].steps[i]["next_value"] = -trajectories_black[board_idx].steps[i]["value"]
+                for i in range(n_b - 1):
+                    trajectories_black[board_idx].steps[i]["next_value"] = -trajectories_white[board_idx].steps[i + 1]["value"]
 
         # After the episode, switch back to training mode
         self.model.train()
