@@ -11,7 +11,10 @@ import random
 from torch.utils.data import IterableDataset, DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from model import BoardEncoder, AlphaChess
+try:  # works both as `python src/buffer.py` and `from src.buffer import ...`
+    from model import BoardEncoder, AlphaChess
+except ImportError:
+    from src.model import BoardEncoder, AlphaChess
 
 class Buffer:
     """ Abstract class for replay buffer (on-policy or off-policy) """

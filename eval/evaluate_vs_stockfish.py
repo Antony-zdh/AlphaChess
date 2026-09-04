@@ -21,7 +21,7 @@ from typing import Dict, List, Optional
 import chess
 import torch
 
-from eval.opponents import AlphaChessOpponent, StockfishOpponent
+from eval.opponents import AlphaChessOpponent, AlphaZeroOpponent, StockfishOpponent
 from eval.competition import play_games
 
 
@@ -32,6 +32,9 @@ def evaluate_model_at_level(
     skill_level: int,
     games: int,
     batch_size: int,
+    opening_plies: int = 8,
+    max_plies: int = 240,
+    seed: int = None,
 ) -> dict:
     sf_opponent = StockfishOpponent(stockfish_path, skill_level)
     approx_elo = sf_opponent.approx_elo
@@ -43,11 +46,13 @@ def evaluate_model_at_level(
             alpha_opponent, sf_opponent,
             model_name, f"stockfish_skill{skill_level}",
             half, batch_size,
+            opening_plies=opening_plies, max_plies=max_plies, seed=seed,
         )
         results_as_black = play_games(
             sf_opponent, alpha_opponent,
             f"stockfish_skill{skill_level}", model_name,
             games - half, batch_size,
+            opening_plies=opening_plies, max_plies=max_plies, seed=seed + 1 if seed is not None else None,
         )
     finally:
         sf_opponent.close()
@@ -138,6 +143,12 @@ def main() -> None:
     parser.add_argument("--skill_levels", default="0,2,4,6,8,10", help="Comma-separated skill levels.")
     parser.add_argument("--games", type=int, default=20, help="Games per model per skill level.")
     parser.add_argument("--batch_size", type=int, default=16, help="AlphaChess inference batch size.")
+    parser.add_argument("--opening_plies", type=int, default=8, help="Max random opening plies per board for diversity.")
+    parser.add_argument("--max_plies", type=int, default=240, help="Adjudicate as draw after this many plies.")
+    parser.add_argument("--seed", type=int, default=1234, help="Random seed for openings.")
+    parser.add_argument("--use_mcts", action="store_true",
+                        help="Use AlphaZero-style MCTS search instead of pure policy argmax.")
+    parser.add_argument("--mcts_sims", type=int, default=400, help="MCTS simulations per move.")
     parser.add_argument("--output", default="eval/stockfish_results.json", help="Output JSON path.")
     args = parser.parse_args()
 
@@ -170,7 +181,13 @@ def main() -> None:
     for model_path in model_paths:
         model_name = os.path.splitext(os.path.basename(model_path))[0]
         print(f"\nEvaluating {model_name}...")
-        alpha_opponent = AlphaChessOpponent(model_path, device, greedy=True)
+        if args.use_mcts:
+            alpha_opponent = AlphaZeroOpponent(model_path, device,
+                                               n_simulations=args.mcts_sims, greedy=True)
+            model_name = f"{model_name}_mcts{args.mcts_sims}"
+            print(f"  (MCTS search, {args.mcts_sims} sims/move)")
+        else:
+            alpha_opponent = AlphaChessOpponent(model_path, device, greedy=True)
 
         for skill_level in skill_levels:
             approx_elo = StockfishOpponent.SKILL_ELO.get(skill_level, "?")
@@ -179,6 +196,9 @@ def main() -> None:
                 model_name, alpha_opponent,
                 args.stockfish_path, skill_level,
                 args.games, args.batch_size,
+                opening_plies=args.opening_plies,
+                max_plies=args.max_plies,
+                seed=args.seed,
             )
             all_results.append(result)
             print(

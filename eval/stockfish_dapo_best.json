@@ -1,0 +1,80 @@
+[
+  {
+    "model": "dapo_best_mcts200",
+    "skill_level": 0,
+    "approx_elo": 800,
+    "games": 20,
+    "wins": 11,
+    "draws": 1,
+    "losses": 8,
+    "win_rate": 0.55,
+    "draw_rate": 0.05,
+    "loss_rate": 0.4,
+    "score": 0.575
+  },
+  {
+    "model": "dapo_best_mcts200",
+    "skill_level": 2,
+    "approx_elo": 1000,
+    "games": 20,
+    "wins": 7,
+    "draws": 0,
+    "losses": 13,
+    "win_rate": 0.35,
+    "draw_rate": 0.0,
+    "loss_rate": 0.65,
+    "score": 0.35
+  },
+  {
+    "model": "dapo_best_mcts200",
+    "skill_level": 4,
+    "approx_elo": 1200,
+    "games": 20,
+    "wins": 1,
+    "draws": 0,
+    "losses": 19,
+    "win_rate": 0.05,
+    "draw_rate": 0.0,
+    "loss_rate": 0.95,
+    "score": 0.05
+  },
+  {
+    "model": "dapo_best_mcts200",
+    "skill_level": 6,
+    "approx_elo": 1400,
+    "games": 20,
+    "wins": 1,
+    "draws": 0,
+    "losses": 19,
+    "win_rate": 0.05,
+    "draw_rate": 0.0,
+    "loss_rate": 0.95,
+    "score": 0.05
+  },
+  {
+    "model": "dapo_best_mcts200",
+    "skill_level": 8,
+    "approx_elo": 1600,
+    "games": 20,
+    "wins": 0,
+    "draws": 0,
+    "losses": 20,
+    "win_rate": 0.0,
+    "draw_rate": 0.0,
+    "loss_rate": 1.0,
+    "score": 0.0
+  },
+  {
+    "model": "dapo_best_mcts200",
+    "skill_level": 10,
+    "approx_elo": 1800,
+    "games": 20,
+    "wins": 0,
+    "draws": 0,
+    "losses": 20,
+    "win_rate": 0.0,
+    "draw_rate": 0.0,
+    "loss_rate": 1.0,
+    "score": 0.0
+  }
+]

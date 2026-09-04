@@ -4,7 +4,7 @@ import time
 
 
 class DataCollector:
-    def __init__(self, output_dir='data/raw'):
+    def __init__(self, output_dir='data'):
         self.output_dir = output_dir
         self.base_url = "https://lichess.org/api/games/user/"
         self.targets = [
@@ -25,7 +25,7 @@ class DataCollector:
         """ Downloads games for target players and saves them as PGN files. """
         os.makedirs(self.output_dir, exist_ok=True)
 
-        output_file = os.path.join(self.output_dir, 'GM_games.pgn')
+        output_file = os.path.join(self.output_dir, 'GM_games_large.pgn')
         success_player_fetches = 0
         
         with open(output_file, 'w', encoding='utf-8') as f:
@@ -45,7 +45,11 @@ class DataCollector:
 
                     # Use stream=True to handle large responses
                     url = self.base_url + player
-                    response = requests.get(url, params=params, stream=True)
+                    token = os.environ.get('LICHESS_TOKEN', '')
+                    headers = {'Accept': 'application/x-chess-pgn'}
+                    if token:
+                        headers['Authorization'] = f'Bearer {token}'
+                    response = requests.get(url, params=params, headers=headers, stream=True)
                     
                     if response.status_code == 200:
                         for chunk in response.iter_content(chunk_size=8192):
@@ -72,5 +76,10 @@ class DataCollector:
 
 
 if __name__ == "__main__":
-    collector = DataCollector()
-    collector.download_games(max_games_per_player=500)
+    import argparse
+    p = argparse.ArgumentParser(description="Download GM games from Lichess")
+    p.add_argument("--max_games", type=int, default=2000, help="Max games per player")
+    p.add_argument("--output_dir", default="data", help="Output directory for PGN")
+    args = p.parse_args()
+    collector = DataCollector(output_dir=args.output_dir)
+    collector.download_games(max_games_per_player=args.max_games)

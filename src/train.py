@@ -230,14 +230,15 @@ def train(args):
                              f"MSE Loss: {interval_mse/interval_batches:.4f} "
                              f"Policy Acc: {interval_acc/interval_batches:.2%}"
                              f" LR: {current_lr:.2e}")
-                wandb.log({
-                    "epoch": epoch + 1,
-                    "loss": interval_loss/interval_batches,
-                    "ce_loss": interval_ce/interval_batches,
-                    "mse_loss": interval_mse/interval_batches,
-                    "policy_accuracy": interval_acc/interval_batches,
-                    "lr": current_lr
-                })
+                if args.wandb:
+                    wandb.log({
+                        "epoch": epoch + 1,
+                        "loss": interval_loss/interval_batches,
+                        "ce_loss": interval_ce/interval_batches,
+                        "mse_loss": interval_mse/interval_batches,
+                        "policy_accuracy": interval_acc/interval_batches,
+                        "lr": current_lr
+                    })
 
                 # Reset interval metrics
                 interval_loss = 0.0

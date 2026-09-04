@@ -1,61 +1,104 @@
-from abc import abstractmethod
+"""GRPO (Group Relative Policy Optimization) for chess self-play RL.
 
-import chess
-import chess.pgn
-import os
-import sys
-import torch
+No critic: the value head is NOT used for advantage. Advantage = group-normalized
+Monte-Carlo discounted return. Per step: adv = gamma^(T-1-t) * terminal_reward
+(terminal_reward already in that trajectory's player perspective, +1 win / -1 loss
+/ draw_penalty). Then normalize across ALL steps in the group:
+    adv_norm = (adv - mean(group)) / (std(group) + eps)
+This group-relative baseline replaces PPO's value-based GAE, sidestepping
+value-head accuracy entirely.
+
+Trajectories store numpy arrays (state, legal_mask) so they pickle through
+mp.Queue via pipe (NOT torch shared memory — avoids /dev/shm exhaustion, see
+az-training memory). get_data_tensors converts back to tensors on the learner.
+"""
 import numpy as np
-import argparse
-import logging
-import wandb
-import random
-from torch.utils.data import IterableDataset, DataLoader
-from torch.optim.lr_scheduler import CosineAnnealingLR
+import torch
+import chess
 
-from model import BoardEncoder, AlphaChess
-from buffer import Buffer, OnPolicyBuffer, OffPolicyBuffer
+try:
+    from src.model import BoardEncoder, AlphaChess
+except ImportError:
+    from model import BoardEncoder, AlphaChess
+
+
+def _to_np(x, dtype):
+    if hasattr(x, "cpu"):
+        return x.detach().cpu().numpy().astype(dtype)
+    return np.asarray(x, dtype=dtype)
+
 
 class GRPOTrajectory:
-    """ 
-    Class representing a single trajectory (game episode) for training. 
-    Each trajectory consists of a sequence of (state, policy, log_prob, reward, value) tuples.
-     In PPO, we have predicted value for each state using the Value Function.
-     In GRPO, we do not have critic, so all value is 0.
-     The trajectory captures the entire sequence of states, actions, rewards, and values for one complete game episode.
-    """
+    """One game's per-step records. reward=0 for all steps except the last,
+    which gets the terminal reward (from this trajectory player's perspective)."""
     def __init__(self):
-        self.steps = []  # List of (state, policy, log_prob, reward, value) tuples
+        self.steps = []  # list of dict: state, action, log_prob, color, legal_mask, reward, advantage
 
-    def add_step(self, state, policy, log_prob, reward, value):
-        self.steps.append((state, policy, log_prob, reward, value))
+    def add_step(self, state, action, log_prob, color, legal_mask):
+        self.steps.append({
+            "state": _to_np(state, np.float32),             # (19,8,8)
+            "action": int(action),                           # 0..4095
+            "log_prob": float(log_prob),
+            "color": bool(color),                            # chess.WHITE/BLACK (side to move)
+            "legal_mask": _to_np(legal_mask, np.bool_),      # (4096,)
+            "reward": 0.0,
+            "advantage": 0.0,
+        })
 
-
-class GRPOGroup():
-    """ Group for GRPO training, containing a batch of trajectories """
-    def __init__(self, trajectories, capacity=32):
-        self.capacity = capacity  # GRPO uses batch of trajectories per update
-        if isinstance(trajectories, list) and len(trajectories) == self.capacity:
-            self.rollout = trajectories  # List of trajectories (multiple game episodes)
-        else:
-            raise ValueError("GRPOGroup requires a list of trajectories (each being a list of (state, policy, value) tuples) with capacity {}.".format(self.capacity))
-
-
-class AdvantageManager:
-    """ Abstract class for managing advantages """
-    def __init__(self):
-        pass
-
-    def compute_advantages(self, group):
-        pass  # To be implemented by subclasses
+    def set_terminal_reward(self, reward):
+        if self.steps:
+            self.steps[-1]["reward"] = float(reward)
 
 
-class PPOAdvantageManager(AdvantageManager):
-    """ Reward manager for PPO, computing advantage estimates for a trajectory """
-    def __init__(self, gamma=0.99):
-        super().__init__()
+class GRPOGroup:
+    def __init__(self, trajectories):
+        if not isinstance(trajectories, list) or len(trajectories) == 0:
+            raise ValueError("GRPOGroup requires a non-empty list of trajectories")
+        self.trajectories = trajectories
+
+    def get_data_tensors(self):
+        """Flatten all trajectories' steps into tensors. Returns
+        (states, actions, old_log_probs, advantages, legal_masks) — NO returns
+        (GRPO has no value target)."""
+        states, actions, log_probs, advantages, legal_masks = [], [], [], [], []
+        for traj in self.trajectories:
+            for s in traj.steps:
+                states.append(s["state"])
+                actions.append(s["action"])
+                log_probs.append(s["log_prob"])
+                advantages.append(s["advantage"])
+                legal_masks.append(s["legal_mask"])
+        states = torch.as_tensor(np.stack(states))                  # (N,19,8,8)
+        actions = torch.as_tensor(np.array(actions), dtype=torch.long)
+        log_probs = torch.as_tensor(np.array(log_probs), dtype=torch.float)
+        advantages = torch.as_tensor(np.array(advantages), dtype=torch.float)
+        legal_masks = torch.as_tensor(np.stack(legal_masks))        # (N,4096) bool
+        return states, actions, log_probs, advantages, legal_masks
+
+
+class GRPOAdvantageManager:
+    """Compute MC-discounted returns per step, then group-normalize (the GRPO
+    group-relative baseline)."""
+    def __init__(self, gamma=0.99, eps=1e-8):
         self.gamma = gamma
+        self.eps = eps
 
-    def compute_advantages(self, group):
-        # Compute advantage estimates for each step in the trajectory
-        pass
+    def compute_advantages(self, group: GRPOGroup):
+        all_adv = []
+        for traj in group.trajectories:
+            T = len(traj.steps)
+            if T == 0:
+                continue
+            r = traj.steps[-1]["reward"]  # terminal reward, this player's perspective
+            for t in range(T):
+                adv = (self.gamma ** (T - 1 - t)) * r
+                traj.steps[t]["advantage"] = adv
+                all_adv.append(adv)
+        if not all_adv:
+            return
+        mean = sum(all_adv) / len(all_adv)
+        var = sum((a - mean) ** 2 for a in all_adv) / len(all_adv)
+        std = var ** 0.5 + self.eps
+        for traj in group.trajectories:
+            for s in traj.steps:
+                s["advantage"] = (s["advantage"] - mean) / std

@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.model import AlphaChess, BoardEncoder
+from src.mcts import BatchMCTS
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +230,9 @@ class BaseOpponent:
     supports_batch = False
 
     def select_move(self, board: chess.Board) -> chess.Move:
+        # Default: delegate to batch path for batch-capable opponents.
+        if self.supports_batch:
+            return self.select_moves_batch([board])[0]
         raise NotImplementedError
 
     def select_moves_batch(self, boards: List[chess.Board]) -> List[chess.Move]:
@@ -279,6 +283,39 @@ class AlphaChessOpponent(BaseOpponent):
             queen_promo = [m for m in candidates if m.promotion == chess.QUEEN]
             return queen_promo[0] if queen_promo else candidates[0]
         return legal_moves[0]
+
+
+class AlphaZeroOpponent(BaseOpponent):
+    """AlphaChess net + MCTS search (AlphaZero-style). Uses the policy head as a
+    tree prior and the value head to evaluate leaves. Fits the batched eval
+    harness: select_moves_batch runs one MCTS per board with batched leaf eval.
+    """
+    supports_batch = True
+
+    def __init__(self, model_path: str, device: torch.device,
+                 n_simulations: int = 400, temperature: float = 0.0,
+                 c_puct: float = 4.0, greedy: bool = True) -> None:
+        self.device = device
+        self.model = AlphaChess().to(device)
+        self.model.load_state_dict(torch.load(model_path, map_location=device))
+        self.model.eval()
+        self.encoder = BoardEncoder()
+        # greedy play -> temperature 0 (argmax over visit counts)
+        temp = 0.0 if greedy else temperature
+        self.mcts = BatchMCTS(
+            model=self.model, encoder=self.encoder, device=device,
+            n_simulations=n_simulations, c_puct=c_puct, temperature=temp)
+
+    def select_moves_batch(self, boards: List[chess.Board]) -> List[chess.Move]:
+        actions = self.mcts.search(boards)
+        moves = []
+        for board, a in zip(boards, actions):
+            if a is None:  # terminal board (play_games shouldn't call on these)
+                legal = list(board.legal_moves)
+                moves.append(legal[0] if legal else chess.Move.null())
+            else:
+                moves.append(AlphaChessOpponent._action_to_move(board, a))
+        return moves
 
 
 class ChessAIKerasOpponent(BaseOpponent):
@@ -610,7 +647,7 @@ def create_opponent(spec: str, device: torch.device) -> OpponentSpec:
     model_path = spec
     if ":" in spec:
         prefix, rest = spec.split(":", 1)
-        if prefix in {"alpha", "chess_ai", "chess_deep_rl", "deep_pink"}:
+        if prefix in {"alpha", "chess_ai", "chess_deep_rl", "deep_pink", "az"}:
             model_type = prefix
             model_path = rest
 
@@ -628,6 +665,17 @@ def create_opponent(spec: str, device: torch.device) -> OpponentSpec:
             sf_path, skill_level = model_path, 5
         opponent = StockfishOpponent(sf_path, skill_level)
         return OpponentSpec(name=f"stockfish_skill{skill_level}", opponent=opponent)
+
+    if model_type == "az":
+        # spec: "az:<path>" or "az:<path>:<n_sims>"
+        parts = model_path.rsplit(":", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            path, n_sims = parts[0], int(parts[1])
+        else:
+            path, n_sims = model_path, 400
+        name = os.path.splitext(os.path.basename(path))[0]
+        return OpponentSpec(name=f"{name}_mcts{n_sims}",
+                            opponent=AlphaZeroOpponent(path, device, n_simulations=n_sims))
 
     if model_type == "alpha":
         name = os.path.splitext(os.path.basename(model_path))[0]

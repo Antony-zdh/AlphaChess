@@ -1,0 +1,41 @@
+[
+  {
+    "model": "alpha_chess_best_mcts200",
+    "skill_level": 0,
+    "approx_elo": 800,
+    "games": 10,
+    "wins": 1,
+    "draws": 0,
+    "losses": 9,
+    "win_rate": 0.1,
+    "draw_rate": 0.0,
+    "loss_rate": 0.9,
+    "score": 0.1
+  },
+  {
+    "model": "alpha_chess_best_mcts200",
+    "skill_level": 2,
+    "approx_elo": 1000,
+    "games": 10,
+    "wins": 0,
+    "draws": 0,
+    "losses": 10,
+    "win_rate": 0.0,
+    "draw_rate": 0.0,
+    "loss_rate": 1.0,
+    "score": 0.0
+  },
+  {
+    "model": "alpha_chess_best_mcts200",
+    "skill_level": 4,
+    "approx_elo": 1200,
+    "games": 10,
+    "wins": 0,
+    "draws": 0,
+    "losses": 10,
+    "win_rate": 0.0,
+    "draw_rate": 0.0,
+    "loss_rate": 1.0,
+    "score": 0.0
+  }
+]

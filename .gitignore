@@ -4,4 +4,12 @@ wandb/
 logs/
 .idea/
 .venv/
-.env
+.envtools/
+data/GM_games_bulk.pgn
+data/GM_games_large.pgn
+*.pth
+!models/sft_large/alpha_chess_best.pth
+!models/az400/az_best.pth
+!models/az_large/az_best.pth
+!models/grpo/grpo_best.pth
+!models/dapo/dapo_best.pth

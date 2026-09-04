@@ -2,6 +2,7 @@ import argparse
 import glob
 import json
 import os
+import random
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -27,10 +28,35 @@ def play_games(
     black_name: str,
     games: int,
     batch_size: int,
+    opening_plies: int = 0,
+    max_plies: int = None,
+    seed: int = None,
 ) -> List[MatchResult]:
+    """Play `games` concurrent boards between two opponents.
+
+    opening_plies: if > 0, each board is seeded with a random number of random
+        legal moves (0..opening_plies) for diversity. This is essential when
+        both sides are the same/similar strength, otherwise games from the
+        initial position repeat and end in draws by repetition/50-move rule.
+    max_plies: if set, games are adjudicated as a draw once this many plies are
+        played, preventing long draw-out games that waste compute and mask the
+        real strength difference.
+    """
     results: List[MatchResult] = []
+    rng = random.Random(seed)
     boards = [chess.Board() for _ in range(games)]
     ply_counts = [0 for _ in range(games)]
+
+    # Opening diversity: random number of random legal plies per board.
+    if opening_plies and opening_plies > 0:
+        for idx, board in enumerate(boards):
+            n_open = rng.randint(0, opening_plies)
+            for _ in range(n_open):
+                if board.is_game_over():
+                    break
+                move = rng.choice(list(board.legal_moves))
+                board.push(move)
+                ply_counts[idx] += 1
 
     active_indices = [i for i in range(games)]
     while active_indices:
@@ -60,20 +86,37 @@ def play_games(
                     boards[idx].push(move)
                     ply_counts[idx] += 1
 
-        active_indices = [i for i in active_indices if not boards[i].is_game_over()]
+        # Drop finished boards; also drop boards that hit the ply cap.
+        active_indices = [
+            i for i in active_indices
+            if not boards[i].is_game_over()
+            and (max_plies is None or ply_counts[i] < max_plies)
+        ]
 
     for idx, board in enumerate(boards):
+        result = board.result()
+        # board.result() returns "*" for an unfinished game (e.g. ply-capped);
+        # adjudicate those as draws so the Elo pipeline gets a valid result.
+        if result == "*":
+            result = "1/2-1/2"
         results.append(MatchResult(
             white=white_name,
             black=black_name,
-            result=board.result(),
+            result=result,
             ply_count=ply_counts[idx],
         ))
 
     return results
 
 
-def round_robin(models: Dict[str, BaseOpponent], games_per_pair: int, batch_size: int) -> List[MatchResult]:
+def round_robin(
+    models: Dict[str, BaseOpponent],
+    games_per_pair: int,
+    batch_size: int,
+    opening_plies: int = 8,
+    max_plies: int = 240,
+    seed: int = None,
+) -> List[MatchResult]:
     names = sorted(models.keys())
     results: List[MatchResult] = []
 
@@ -81,8 +124,10 @@ def round_robin(models: Dict[str, BaseOpponent], games_per_pair: int, batch_size
         for black_name in names[i + 1:]:
             white_model = models[white_name]
             black_model = models[black_name]
-            results.extend(play_games(white_model, black_model, white_name, black_name, games_per_pair, batch_size))
-            results.extend(play_games(black_model, white_model, black_name, white_name, games_per_pair, batch_size))
+            results.extend(play_games(white_model, black_model, white_name, black_name,
+                                      games_per_pair, batch_size, opening_plies, max_plies, seed))
+            results.extend(play_games(black_model, white_model, black_name, white_name,
+                                      games_per_pair, batch_size, opening_plies, max_plies, seed))
 
     return results
 

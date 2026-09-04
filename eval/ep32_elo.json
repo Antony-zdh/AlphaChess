@@ -1,0 +1,67 @@
+[
+  {
+    "model": "alpha_chess_best_mcts100",
+    "skill_level": 0,
+    "approx_elo": 800,
+    "games": 10,
+    "wins": 8,
+    "draws": 2,
+    "losses": 0,
+    "win_rate": 0.8,
+    "draw_rate": 0.2,
+    "loss_rate": 0.0,
+    "score": 0.9
+  },
+  {
+    "model": "alpha_chess_best_mcts100",
+    "skill_level": 2,
+    "approx_elo": 1000,
+    "games": 10,
+    "wins": 8,
+    "draws": 0,
+    "losses": 2,
+    "win_rate": 0.8,
+    "draw_rate": 0.0,
+    "loss_rate": 0.2,
+    "score": 0.8
+  },
+  {
+    "model": "alpha_chess_best_mcts100",
+    "skill_level": 4,
+    "approx_elo": 1200,
+    "games": 10,
+    "wins": 2,
+    "draws": 1,
+    "losses": 7,
+    "win_rate": 0.2,
+    "draw_rate": 0.1,
+    "loss_rate": 0.7,
+    "score": 0.25
+  },
+  {
+    "model": "alpha_chess_best_mcts100",
+    "skill_level": 6,
+    "approx_elo": 1400,
+    "games": 10,
+    "wins": 1,
+    "draws": 2,
+    "losses": 7,
+    "win_rate": 0.1,
+    "draw_rate": 0.2,
+    "loss_rate": 0.7,
+    "score": 0.2
+  },
+  {
+    "model": "alpha_chess_best_mcts100",
+    "skill_level": 8,
+    "approx_elo": 1600,
+    "games": 10,
+    "wins": 0,
+    "draws": 0,
+    "losses": 10,
+    "win_rate": 0.0,
+    "draw_rate": 0.0,
+    "loss_rate": 1.0,
+    "score": 0.0
+  }
+]

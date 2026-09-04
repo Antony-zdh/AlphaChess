@@ -5,7 +5,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 PROJECT_ROOT="$SCRIPT_DIR/.."
 export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
 
-STOCKFISH_PATH="${STOCKFISH_PATH:-stockfish}"
+STOCKFISH_PATH="${STOCKFISH_PATH:-tools/stockfish_bin}"
 SKILL_LEVELS="${SKILL_LEVELS:-0,2,4,6,8,10}"
 GAMES="${GAMES:-20}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
